@@ -1,0 +1,5 @@
+load 0 a
+aim a
+fire
+add 1 a a
+jmp -3
