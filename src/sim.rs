@@ -1,6 +1,8 @@
 use std::sync::RwLock;
 use std::sync::Arc;
 
+use std::cell::RefCell;
+
 use serde::{Serialize, Serializer};
 
 use ::vm::*;
@@ -18,7 +20,7 @@ pub struct Tank {
     pub aim: f32,
     pub angle: f32,
     pub team: Team,
-    pub temp: i32,
+    pub temp: isize,
     pub vm: VM,
     pub dead: bool,
 }
@@ -82,7 +84,7 @@ impl Serialize for Tank
 // }
 
 impl Tank {
-    pub fn apply_heat(&mut self, heat: i32) {
+    pub fn apply_heat(&mut self, heat: isize) {
         self.temp = self.temp.saturating_add(heat);
         if self.temp < 0 { self.temp = 0; }
     }
@@ -125,6 +127,9 @@ impl Entity for Tank {
                 self.vm.state.regs.a = (self.pos.x as isize) / 4;
                 self.vm.state.regs.b = (self.pos.y as isize) / 4;
             },
+            UpCall::Temp => {
+                self.vm.state.regs.a = self.temp;
+            },
             UpCall::Move => {
                 self.pos = self.pos + Pair::polar(self.angle) * world.config.tank_v;
             },
@@ -138,7 +143,7 @@ impl Entity for Tank {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,Serialize)]
 pub struct Bullet {
     pub pos: Pair,
     pub vel: Pair,
@@ -153,10 +158,10 @@ impl Entity for Bullet {
 
 #[derive(Debug,Clone)]
 pub struct Configuration {
-    pub shoot_heat: i32,
-    pub idle_heat: i32,
-    pub move_heat: i32,
-    pub death_heat: i32,
+    pub shoot_heat: isize,
+    pub idle_heat: isize,
+    pub move_heat: isize,
+    pub death_heat: isize,
     pub bullet_v: f32,
     pub bullet_s: f32,
     pub hit_rad: f32,
@@ -186,6 +191,7 @@ impl Configuration {
             config: self,
             tanks: Arc::new(RwLock::new(Vec::new())),
             bullets: Arc::new(RwLock::new(Vec::new())),
+            action_queue: RefCell::new(Vec::new()),
         }
     }
 }
@@ -195,6 +201,13 @@ pub struct World {
     pub config: Configuration,
     pub tanks: Arc<RwLock<Vec<Identity<Arc<RwLock<Tank>>>>>>,
     pub bullets: Arc<RwLock<Vec<Identity<Arc<RwLock<Bullet>>>>>>,
+    action_queue: RefCell<Vec<WorldAction>>
+}
+
+#[derive(Clone, Debug)]
+enum WorldAction
+{
+    Explode(Pair, f32),  // Center and radius of explosion
 }
 
 impl World {
@@ -246,6 +259,15 @@ impl World {
             }
         }
 
+        let mut queue = self.action_queue.borrow_mut();
+        while let Some(action) = queue.pop()
+        {
+            match action
+            {
+                WorldAction::Explode(pos, rad) => self.do_explode(pos, rad),
+            }
+        }
+
         // Clean the bullet list, now that we can
         let bullets = self.bullets.read().unwrap().iter().filter(|b| !b.read().unwrap().dead).cloned().collect();
         *self.bullets.write().unwrap() = bullets;
@@ -262,11 +284,16 @@ impl World {
             .fold((0usize, 0usize), |(us, them), (t, _a)| if t.read().unwrap().team == tm { (us + 1, them) } else { (us, them + 1) })
     }
 
-    pub fn explode(&self, pos: Pair, rad: f32) {
+    fn do_explode(&self, pos: Pair, rad: f32) {
         for t in self.tanks.write().unwrap().iter_mut() {
             if (t.read().unwrap().pos + (-pos)).limag() <= rad {
                 t.write().unwrap().dead = true;
             }
         }
+    }
+
+    pub fn explode(&self, pos: Pair, rad: f32)
+    {
+        self.action_queue.borrow_mut().push(WorldAction::Explode(pos, rad));
     }
 }

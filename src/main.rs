@@ -5,12 +5,26 @@ extern crate RANKS;
 
 use std::{env, fs};
 use std::io::Read;
+use std::sync::{Arc,RwLock};
+use std::thread::sleep;
+use std::time::Duration;
+
+use serde::Serialize;
 
 use RANKS::vm::{Program, Parser, VM, StateBuilder};
-use RANKS::sim::{Configuration, Tank, Team};
+use RANKS::sim::{Configuration, Tank, Team, Identity, Bullet};
 use RANKS::space::Pair;
 
 const WORLD_SIZE: usize = 500;
+
+const DELAY_DURATION: Duration = Duration::from_millis(100);
+
+#[derive(Serialize)]
+struct UpdatePacket<'a>
+{
+    tanks: &'a Vec<Identity<Arc<RwLock<Tank>>>>,
+    bullets: &'a Vec<Identity<Arc<RwLock<Bullet>>>>,
+}
 
 fn main() {
     let progs: Vec<Program> = env::args_os().skip(1).map(
@@ -35,9 +49,17 @@ fn main() {
         });
     }
 
-    for _i in 0..10 {
+    let mut stepnum = 0;
+    while (!world.finished())
+    {
         world.step();
-        println!("json: {}", serde_json::to_string(&*world.tanks.read().unwrap()).unwrap());
+        println!("Step: {}", stepnum);
+        println!("json: {}", serde_json::to_string(&UpdatePacket{
+            tanks: &*world.tanks.read().unwrap(),
+            bullets: &*world.bullets.read().unwrap(),
+        }).unwrap());
+        sleep(DELAY_DURATION);
+        stepnum += 1;
         //eprintln!("---\n{:?}", world);
     }
 }
