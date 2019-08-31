@@ -1,13 +1,16 @@
+extern crate serde;
+extern crate serde_json;
+
 extern crate RANKS;
 
 use std::{env, fs};
 use std::io::Read;
 
 use RANKS::vm::{Program, Parser, VM, StateBuilder};
-use RANKS::sim::{World, Configuration, Tank, Team};
+use RANKS::sim::{Configuration, Tank, Team};
 use RANKS::space::Pair;
 
-const world_size: usize = 500;
+const WORLD_SIZE: usize = 500;
 
 fn main() {
     let progs: Vec<Program> = env::args_os().skip(1).map(
@@ -22,7 +25,7 @@ fn main() {
     let mut world = Configuration::default().build();
     for (idx, prog) in progs.into_iter().enumerate() {
         world.add_tank(Tank {
-            pos: Pair::polar((idx as f32) / (progcount as f32) * 2.0 * ::std::f32::consts::PI) * 0.75 * (world_size as f32),
+            pos: Pair::polar((idx as f32) / (progcount as f32) * 2.0 * ::std::f32::consts::PI) * 0.75 * (WORLD_SIZE as f32),
             aim: 0.0,
             angle: 0.0,
             team: idx as Team,
@@ -32,8 +35,9 @@ fn main() {
         });
     }
 
-    for i in 0..10 {
+    for _i in 0..10 {
         world.step();
-        eprintln!("---\n{:?}", world);
+        println!("json: {}", serde_json::to_string(&*world.tanks.read().unwrap()).unwrap());
+        //eprintln!("---\n{:?}", world);
     }
 }

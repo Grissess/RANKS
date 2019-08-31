@@ -2,7 +2,9 @@ use std::ops::{Add, Neg, Mul};
 use std::marker::PhantomData;
 use std::cell::{UnsafeCell, RefCell};
 
-#[derive(Debug,Clone,Copy,PartialEq)]
+use serde::Serialize;
+
+#[derive(Debug,Clone,Copy,PartialEq,Serialize)]
 pub struct Pair {
     pub x: f32,
     pub y: f32,

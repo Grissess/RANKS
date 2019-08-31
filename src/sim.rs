@@ -1,5 +1,7 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::RwLock;
+use std::sync::Arc;
+
+use serde::{Serialize, Serializer};
 
 use ::vm::*;
 use ::space::*;
@@ -20,6 +22,64 @@ pub struct Tank {
     pub vm: VM,
     pub dead: bool,
 }
+
+// Identity type; needed to make Serdes work properly with Arcs.
+#[derive(Debug,Clone)]
+pub struct Identity<T> (T);
+
+impl<T> std::ops::Deref for Identity<T>
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target
+    {
+        &self.0
+    }
+}
+
+impl<T, U> Serialize for Identity<T>
+where T: std::ops::Deref<Target=U>, U: Serialize
+{
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+        where S: Serializer
+    {
+        self.0.serialize(s)
+    }
+}
+
+#[derive(Serialize)]
+struct TankSerInfo
+{
+    pos: Pair,
+    angle: f32,
+    team: Team,
+    dead: bool,
+}
+
+impl Serialize for Tank
+{
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+        where S: Serializer
+    {
+        let info = TankSerInfo
+        {
+            pos: self.pos,
+            angle: self.angle,
+            team: self.team,
+            dead: self.dead,
+        };
+        info.serialize(s)
+    }
+}
+
+// impl Serialize for <Tank>
+// {
+//     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+//         where S: Serializer
+//     {
+//         self.serialize(s);
+//     }
+// }
 
 impl Tank {
     pub fn apply_heat(&mut self, heat: i32) {
@@ -49,11 +109,11 @@ impl Entity for Tank {
             },
             UpCall::Fire => {
                 self.apply_heat(world.config.shoot_heat);
-                world.bullets.borrow_mut().push(Rc::new(RefCell::new(Bullet{
+                world.bullets.write().unwrap().push(Identity(Arc::new(RwLock::new(Bullet{
                     pos: self.pos + Pair::polar(self.aim) * world.config.bullet_s,
                     vel: Pair::polar(self.aim) * world.config.bullet_v,
                     dead: false,
-                })));
+                }))));
             },
             UpCall::Aim(hd) => {
                 self.aim = hd.0;
@@ -86,7 +146,7 @@ pub struct Bullet {
 }
 
 impl Entity for Bullet {
-    fn step(&mut self, world: &World) {
+    fn step(&mut self, _world: &World) {
         self.pos = self.pos + self.vel;
     }
 }
@@ -124,8 +184,8 @@ impl Configuration {
     pub fn build(self) -> World {
         World {
             config: self,
-            tanks: RefCell::new(Vec::new()),
-            bullets: RefCell::new(Vec::new()),
+            tanks: Arc::new(RwLock::new(Vec::new())),
+            bullets: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -133,79 +193,79 @@ impl Configuration {
 #[derive(Debug,Clone)]
 pub struct World {
     pub config: Configuration,
-    pub tanks: RefCell<Vec<Rc<RefCell<Tank>>>>,
-    pub bullets: RefCell<Vec<Rc<RefCell<Bullet>>>>,
+    pub tanks: Arc<RwLock<Vec<Identity<Arc<RwLock<Tank>>>>>>,
+    pub bullets: Arc<RwLock<Vec<Identity<Arc<RwLock<Bullet>>>>>>,
 }
 
 impl World {
     pub fn add_tank(&mut self, tank: Tank) {
-        self.tanks.borrow_mut().push(Rc::new(RefCell::new(tank)));
+        self.tanks.write().unwrap().push(Identity(Arc::new(RwLock::new(tank))));
     }
 
     pub fn step(&mut self) {
         // All entity steps
-        for t in self.tanks.borrow().iter() {
-            if !t.borrow().dead {
-                t.borrow_mut().step(&self);
+        for t in self.tanks.read().unwrap().iter() {
+            if !t.read().unwrap().dead {
+                t.write().unwrap().step(&self);
             }
         }
-        for b in self.bullets.borrow().iter() {
-            b.borrow_mut().step(&self);
+        for b in self.bullets.read().unwrap().iter() {
+            b.write().unwrap().step(&self);
         }
         
         // All collisions
         enum EntityRef {
-            Tank(Rc<RefCell<Tank>>),
-            Bullet(Rc<RefCell<Bullet>>),
+            Tank(Arc<RwLock<Tank>>),
+            Bullet(Arc<RwLock<Bullet>>),
         }
         let mut root: QuadTreeNode<EntityRef> = QuadTreeBuilder::from_bound(AABB::over_points(
-                self.tanks.borrow().iter().map(|t| t.borrow().pos).chain(
-                    self.bullets.borrow().iter().map(|b| b.borrow().pos)
+                self.tanks.read().unwrap().iter().map(|t| t.read().unwrap().pos).chain(
+                    self.bullets.read().unwrap().iter().map(|b| b.read().unwrap().pos)
                 )
         )).build();
 
-        for t in self.tanks.borrow().iter() {
-            root.add_pt((t.borrow().pos, EntityRef::Tank(Rc::clone(t))));
+        for t in self.tanks.read().unwrap().iter() {
+            root.add_pt((t.read().unwrap().pos, EntityRef::Tank(Arc::clone(t))));
         }
-        for b in self.bullets.borrow().iter() {
-            root.add_pt((b.borrow().pos, EntityRef::Bullet(Rc::clone(b))));
+        for b in self.bullets.read().unwrap().iter() {
+            root.add_pt((b.read().unwrap().pos, EntityRef::Bullet(Arc::clone(b))));
         }
 
-        for t in self.tanks.borrow().iter() {
-            let v: Vec<&EntityRef> = root.query(AABB::around(t.borrow().pos, Pair::both(self.config.hit_rad))).map(|(_, r)| r).collect();
+        for t in self.tanks.read().unwrap().iter() {
+            let v: Vec<&EntityRef> = root.query(AABB::around(t.read().unwrap().pos, Pair::both(self.config.hit_rad))).map(|(_, r)| r).collect();
             if v.iter().filter(|r| match r {
-                &EntityRef::Tank(ref t) => !t.borrow().dead,
-                &EntityRef::Bullet(ref b) => !b.borrow().dead,
+                &EntityRef::Tank(ref t) => !t.read().unwrap().dead,
+                &EntityRef::Bullet(ref b) => !b.read().unwrap().dead,
             }).any(|_| true) {
                 for r in v {
                     match r {
-                        &EntityRef::Tank(ref t) => t.borrow_mut().dead = true,
-                        &EntityRef::Bullet(ref b) => b.borrow_mut().dead = true,
+                        &EntityRef::Tank(ref t) => t.write().unwrap().dead = true,
+                        &EntityRef::Bullet(ref b) => b.write().unwrap().dead = true,
                     }
                 }
             }
         }
 
         // Clean the bullet list, now that we can
-        let bullets = self.bullets.borrow().iter().filter(|b| !b.borrow().dead).cloned().collect();
-        self.bullets.replace(bullets);
+        let bullets = self.bullets.read().unwrap().iter().filter(|b| !b.read().unwrap().dead).cloned().collect();
+        *self.bullets.write().unwrap() = bullets;
     }
 
     pub fn finished(&self) -> bool {
-        self.tanks.borrow().iter().all(|t| t.borrow().dead)
+        self.tanks.read().unwrap().iter().all(|t| t.read().unwrap().dead)
     }
 
     pub fn scan(&self, pos: Pair, tm: Team, bounds: (Heading, Heading)) -> (usize, usize) {
-        self.tanks.borrow().iter()
-            .map(|tank| (tank, (tank.borrow().pos + (-pos)).ang()))
+        self.tanks.read().unwrap().iter()
+            .map(|tank| (tank, (tank.read().unwrap().pos + (-pos)).ang()))
             .filter(|(_t, a)| *a >= (bounds.0).0 && *a < (bounds.1).0)
-            .fold((0usize, 0usize), |(us, them), (t, a)| if t.borrow().team == tm { (us + 1, them) } else { (us, them + 1) })
+            .fold((0usize, 0usize), |(us, them), (t, _a)| if t.read().unwrap().team == tm { (us + 1, them) } else { (us, them + 1) })
     }
 
     pub fn explode(&self, pos: Pair, rad: f32) {
-        for t in self.tanks.borrow_mut().iter_mut() {
-            if (t.borrow().pos + (-pos)).limag() <= rad {
-                t.borrow_mut().dead = true;
+        for t in self.tanks.write().unwrap().iter_mut() {
+            if (t.read().unwrap().pos + (-pos)).limag() <= rad {
+                t.write().unwrap().dead = true;
             }
         }
     }
