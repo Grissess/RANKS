@@ -1,462 +1,270 @@
-use std::num::ParseIntError;
-use std::iter;
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug,Clone)]
-pub enum ParseError {
-    UnknownInstruction(String),
-    UnknownRegister(String),
-    MissingOperand(String, usize),
-    BadInt(ParseIntError),
-    Empty,
-}
+use num_traits::FromPrimitive;
+use num_derive::FromPrimitive;
 
-pub trait Parser: Sized {
-    fn parse(s: &str) -> Result<Self, ParseError>;
-}
+use wasmi::{
+    ExternVal, Externals, FuncInstance, FuncInvocation, FuncRef, HostError, ImportsBuilder,
+    ModuleImportResolver, ModuleInstance, nan_preserving_float::F32, RuntimeArgs, RuntimeValue,
+    Signature, Trap, TrapKind, ValueType, ResumableError
+};
 
-#[derive(Debug,Clone,Copy,PartialEq,PartialOrd)]
-pub struct Heading(pub f32);  // nominally radians
-
-impl Heading {
-    const DIVISOR: usize = 256usize;
-
-    pub fn to_integral(&self) -> isize {
-        ((self.0 / (2.0 * ::std::f32::consts::PI)) * (Heading::DIVISOR as f32)) as isize
-    }
-}
-
-impl From<isize> for Heading {
-    fn from(v: isize) -> Heading {
-        Heading(2.0 * ::std::f32::consts::PI * ((v / (Heading::DIVISOR as isize)) as f32))
-    }
-}
-
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum Register {
-    A,
-    B,
-    X,
-    T,
-}
-
-impl Parser for Register {
-    fn parse(s: &str) -> Result<Register, ParseError> {
-        match s.trim() {
-            "a" | "A" => Ok(Register::A),
-            "b" | "B" => Ok(Register::B),
-            "x" | "X" => Ok(Register::X),
-            "t" | "T" => Ok(Register::T),
-            v => Err(ParseError::UnknownRegister(v.into())),
-        }
-    }
-}
-
-#[derive(Debug,Clone,Default)]
-pub struct Registers {
-    pub a: isize,
-    pub b: isize,
-    pub t: bool,
-    pub x: usize,
-}
-
-#[derive(Debug,Clone)]
-pub enum Target {
-    Reg(Register),
-    Mem(usize),
-}
-
-impl Parser for Target {
-    fn parse(s: &str) -> Result<Target, ParseError> {
-        if s == "*" {
-            return Ok(Target::Reg(Register::X));
-        }
-        if s.starts_with("(") {
-            return Ok(Target::Mem(usize::from_str_radix(&s[1..], 10).map_err(ParseError::BadInt)?));
-        }
-        Ok(Target::Reg(Register::parse(s)?))
-    }
-}
-
-
-#[derive(Debug,Clone)]
-pub enum Valuant {
-    Target(Target),
-    Const(isize),
-}
-
-impl Parser for Valuant {
-    fn parse(s: &str) -> Result<Valuant, ParseError> {
-        match isize::from_str_radix(s, 10) {
-            Ok(i) => Ok(Valuant::Const(i)),
-            Err(_) => Ok(Valuant::Target(Target::parse(s)?)),
-        }
-    }
-}
-
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum BinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-}
-
-impl BinOp {
-    pub fn apply(&self, left: isize, right: isize) -> Option<isize> {
-        match self {
-            &BinOp::Add => Some(left + right),
-            &BinOp::Sub => Some(left - right),
-            &BinOp::Mul => Some(left * right),
-            &BinOp::Div => if right == 0 { None } else { Some(left / right) },
-            &BinOp::Mod => if right == 0 { None } else { Some(left % right) },
-        }
-    }
-}
-
-impl Parser for BinOp {
-    fn parse(s: &str) -> Result<BinOp, ParseError> {
-        match s {
-            "add" => Ok(BinOp::Add),
-            "sub" => Ok(BinOp::Sub),
-            "mul" => Ok(BinOp::Mul),
-            "div" => Ok(BinOp::Div),
-            "mod" => Ok(BinOp::Mod),
-            _ => Err(ParseError::UnknownInstruction(s.into())),
-        }
-    }
-}
-
-#[derive(Debug,Clone,Copy,PartialEq)]
-pub enum UpCall {
-    None,
+#[repr(usize)]
+#[derive(FromPrimitive)]
+enum UpcallId {
     Scan,
     Fire,
-    Aim(Heading),
-    Turn(Heading),
+    Aim,
+    Turn,
+    GPSX,
+    GPSY,
     Temp,
-    GPS,
-    Move,
+    Forward,
     Explode,
     Yield,
 }
 
-#[derive(Debug,Clone)]
-pub enum UpCallInstr {
+impl UpcallId {
+    pub fn from_name(name: &str) -> Result<Self, ()> {
+        match name {
+            "scan"      => Ok(UpcallId::Scan),
+            "fire"      => Ok(UpcallId::Fire),
+            "aim"       => Ok(UpcallId::Aim),
+            "turn"      => Ok(UpcallId::Turn),
+            "gpsx"      => Ok(UpcallId::GPSX),
+            "gpsy"      => Ok(UpcallId::GPSY),
+            "temp"      => Ok(UpcallId::Temp),
+            "forward"   => Ok(UpcallId::Forward),
+            "explode"   => Ok(UpcallId::Explode),
+            "yield"     => Ok(UpcallId::Yield),
+            _ => Err(()),
+        }
+    }
+
+    pub fn signature(&self) -> (Vec<ValueType>, Option<ValueType>) {
+        match self {
+            UpcallId::Scan     => (vec![ValueType::F32, ValueType::F32], Some(ValueType::I64)),
+            UpcallId::Fire     => (vec![], None),
+            UpcallId::Aim      => (vec![ValueType::F32], None),
+            UpcallId::Turn     => (vec![ValueType::F32], None),
+            UpcallId::GPSX     => (vec![], Some(ValueType::F32)),
+            UpcallId::GPSY     => (vec![], Some(ValueType::F32)),
+            UpcallId::Temp     => (vec![], Some(ValueType::I32)),
+            UpcallId::Forward  => (vec![], None),
+            UpcallId::Explode  => (vec![], None),
+            UpcallId::Yield    => (vec![], None),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Upcall {
     None,
-    Scan,
+    Scan(f32, f32, Arc<Mutex<Option<u64>>>),
     Fire,
-    Aim(Valuant),
-    Turn(Valuant),
-    GPS,
-    Temp,
-    Move,
+    Aim(f32),
+    Turn(f32),
+    GPSX(Arc<Mutex<Option<f32>>>),
+    GPSY(Arc<Mutex<Option<f32>>>),
+    Temp(Arc<Mutex<Option<i32>>>),
+    Forward,
     Explode,
-    Yield,
 }
 
-impl UpCallInstr {
-    pub fn to_upcall(&self) -> Option<UpCall> {
+impl Upcall {
+    pub fn alters_world(&self) -> bool {
         match self {
-            &UpCallInstr::None => Some(UpCall::None),
-            &UpCallInstr::Scan => Some(UpCall::Scan),
-            &UpCallInstr::Fire => Some(UpCall::Fire),
-            &UpCallInstr::GPS => Some(UpCall::GPS),
-            &UpCallInstr::Temp => Some(UpCall::Temp),
-            &UpCallInstr::Move => Some(UpCall::Move),
-            &UpCallInstr::Explode => Some(UpCall::Explode),
-            &UpCallInstr::Yield => Some(UpCall::Yield),
-            _ => None,
+            Upcall::None            => false,
+            Upcall::Scan(_, _, _)   => false,
+            Upcall::Fire            => true,
+            Upcall::Aim(_)          => true,
+            Upcall::Turn(_)         => true,
+            Upcall::GPSX(_)         => false,
+            Upcall::GPSY(_)         => false,
+            Upcall::Temp(_)         => false,
+            Upcall::Forward         => true,
+            Upcall::Explode         => true,
         }
     }
 }
 
-impl Parser for UpCallInstr {
-    fn parse(s: &str) -> Result<UpCallInstr, ParseError> {
-        match s {
-            "none" => Ok(UpCallInstr::None),
-            "scan" => Ok(UpCallInstr::Scan),
-            "fire" => Ok(UpCallInstr::Fire),
-            "gps" => Ok(UpCallInstr::GPS),
-            "temp" => Ok(UpCallInstr::Temp),
-            "move" => Ok(UpCallInstr::Move),
-            "explode" => Ok(UpCallInstr::Explode),
-            _ => Err(ParseError::UnknownInstruction(s.into())),
-        }
-    }
-}
-
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum Comparison {
-    Less,
-    Equal,
-}
-
-impl Comparison {
-    pub fn compare(&self, left: isize, right: isize) -> bool {
+impl core::fmt::Display for Upcall {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            &Comparison::Less => left < right,
-            &Comparison::Equal => left == right,
+            Upcall::None            => write!(f, "none")?,
+            Upcall::Scan(a, b, _)   => write!(f, "scan between {} and {}", a, b)?,
+            Upcall::Fire            => write!(f, "fire")?,
+            Upcall::Aim(h)          => write!(f, "aim at {}", h)?,
+            Upcall::Turn(h)         => write!(f, "turn to {}", h)?,
+            Upcall::GPSX(_)         => write!(f, "get GPS X")?,
+            Upcall::GPSY(_)         => write!(f, "get GPS Y")?,
+            Upcall::Temp(_)         => write!(f, "get temperature")?,
+            Upcall::Forward         => write!(f, "move forward")?,
+            Upcall::Explode         => write!(f, "explode")?,
         }
+        Ok(())
     }
 }
 
-impl Parser for Comparison {
-    fn parse(s: &str) -> Result<Comparison, ParseError> {
-        match s {
-            "tlt" => Ok(Comparison::Less),
-            "teq" => Ok(Comparison::Equal),
-            _ => Err(ParseError::UnknownInstruction(s.into())),
+impl HostError for Upcall {}
+
+#[derive(Clone, Debug)]
+struct Upcaller {}
+
+impl ModuleImportResolver for Upcaller {
+    fn resolve_func(
+        &self,
+        field_name: &str,
+        signature: &Signature,
+    ) -> Result<FuncRef, wasmi::Error> {
+        let id = UpcallId::from_name(field_name).map_err(|_| wasmi::Error::Instantiation(format!("Export {} not found", field_name)))?;
+        let (params, rt) = id.signature();
+        if params != signature.params() || rt != signature.return_type() {
+            return Err(wasmi::Error::Instantiation(format!("Incorrect signature on {}", field_name)));
         }
+        return Ok(FuncInstance::alloc_host(Signature::new(params, rt), id as usize));
     }
 }
 
-#[derive(Debug,Clone)]
-pub enum Instruction {
-    BinOp {
-        binop: BinOp,
-        left: Valuant,
-        right: Valuant,
-        dest: Target,
-    },
-    Compare {
-        comparison: Comparison,
-        left: Valuant,
-        right: Valuant,
-    },
-    UpCall(UpCallInstr),
-    Jump(isize),
-    JumpIfT(isize),
-}
-
-pub fn get_using<T, F: Fn(&str) -> Result<T, ParseError>>(words: &Vec<&str>, idx: usize, f: &F) -> Result<T, ParseError> {
-    words.get(idx).map(|&x| x).ok_or_else(|| ParseError::MissingOperand((*words.first().unwrap()).into(), idx)).and_then(f)
-}
-
-impl Parser for Instruction {
-    fn parse(s: &str) -> Result<Instruction, ParseError> {
-        let words: Vec<&str> = s.split_whitespace().collect();
-        match words.first() {
-            Some(word) => match &*word.to_lowercase() {
-                "load" => Ok(Instruction::BinOp {
-                    binop: BinOp::Add,
-                    left: Valuant::Const(0isize),
-                    right: get_using(&words, 1, &Valuant::parse)?,
-                    dest: get_using(&words, 2, &Target::parse)?,
-                }),
-                "write" => {
-                    let res = Ok(Instruction::BinOp {
-                        binop: BinOp::Add,
-                        left: Valuant::Const(0isize),
-                        right: get_using(&words, 1, &Valuant::parse)?,
-                        dest: get_using(&words, 2, &Target::parse)?,
-                    });
-                    if let Ok(Instruction::BinOp{dest: Target::Reg(_), ..}) = res {
-                        println!("warn: write to non-memory will be treated as normal load: {:?}", s);
-                    }
-                    res
-                },
-                op @ "add" | op @ "sub" | op @ "mul" | op @ "div" | op @ "mod" => Ok(Instruction::BinOp {
-                    binop: BinOp::parse(op)?,
-                    left: get_using(&words, 1, &Valuant::parse)?,
-                    right: get_using(&words, 2, &Valuant::parse)?,
-                    dest: get_using(&words, 3, &Target::parse)?,
-                }),
-                op @ "tlt" | op @ "teq" => Ok(Instruction::Compare {
-                    comparison: Comparison::parse(op)?,
-                    left: get_using(&words, 1, &Valuant::parse)?,
-                    right: get_using(&words, 2, &Valuant::parse)?,
-                }),
-                op @ "scan" | op @ "fire" | op @ "gps" | op @ "move" | op @ "temp" => Ok(Instruction::UpCall(UpCallInstr::parse(op)?)),
-                "aim" => Ok(Instruction::UpCall(UpCallInstr::Aim(get_using(&words, 1, &Valuant::parse)?))),
-                "turn" => Ok(Instruction::UpCall(UpCallInstr::Turn(get_using(&words, 1, &Valuant::parse)?))),
-                "nop" => Ok(Instruction::UpCall(UpCallInstr::Yield)),
-                "jmp" => Ok(Instruction::Jump(
-                    words.get(1).ok_or_else(|| ParseError::MissingOperand((*word as &str).into(), 1)).and_then(|o| {
-                        isize::from_str_radix(o, 10).map_err(|e| ParseError::BadInt(e))
-                    })?
-                )),
-                "jmpif" => Ok(Instruction::JumpIfT(
-                    words.get(1).ok_or_else(|| ParseError::MissingOperand((*word as &str).into(), 1)).and_then(|o| {
-                        isize::from_str_radix(o, 10).map_err(|e| ParseError::BadInt(e))
-                    })?
-                )),
-                w => Err(ParseError::UnknownInstruction(w.into())),
-            },
-            None => Err(ParseError::Empty),
-        }
-    }
-}
-
-#[derive(Debug,Clone)]
-pub struct State {
-    pub mem: Vec<isize>,
-    pub regs: Registers,
-}
-
-impl State {
-    pub fn evaluate(&self, v: &Valuant) -> isize {
-        match v {
-            &Valuant::Target(Target::Reg(reg)) => match reg {
-                Register::A => self.regs.a,
-                Register::B => self.regs.b,
-                Register::X => self.evaluate(&Valuant::Target(Target::Mem(self.regs.t as usize))),
-                Register::T => if self.regs.t { 1 } else { 0 },
-            },
-            &Valuant::Target(Target::Mem(addr)) => self.mem.get(addr).map(|&x| x).unwrap_or_else(Default::default),
-            &Valuant::Const(c) => c,
-        }
-    }
-
-    pub fn load(&mut self, t: &Target, v: isize) {
-        match t {
-            &Target::Reg(ref r) => match r {
-                &Register::A => self.regs.a = v,
-                &Register::B => self.regs.b = v,
-                &Register::X => self.regs.x = v as usize,
-                &Register::T => self.regs.t = v != 0,
-            },
-            &Target::Mem(addr) => { self.mem.get_mut(addr).map(|x| *x = v); },
-        }
-    }
-
-    pub fn exec(&mut self, inst: &Instruction) -> (UpCall, Option<isize>) {
-        match inst {
-            &Instruction::BinOp { ref binop, ref left, ref right, ref dest } => {
-                let lval = self.evaluate(left);
-                let rval = self.evaluate(right);
-                match binop.apply(lval, rval) {
-                    None => (UpCall::Explode, None),
-                    Some(v) => {
-                        self.load(dest, v);
-                        (UpCall::None, None)
-                    },
-                }
-            },
-            &Instruction::Compare { ref comparison, ref left, ref right } => {
-                let lval = self.evaluate(left);
-                let rval = self.evaluate(right);
-                self.regs.t = comparison.compare(lval, rval);
-                (UpCall::None, None)
-            },
-            &Instruction::UpCall(ref uci) => match uci.to_upcall() {
-                Some(uc) => (uc, None),
-                None => match uci {
-                    &UpCallInstr::Aim(ref v) => (UpCall::Aim(self.evaluate(v).into()), None),
-                    &UpCallInstr::Turn(ref v) => (UpCall::Turn(self.evaluate(v).into()), None),
-                    _ => unreachable!(),
-                },
-            },
-            &Instruction::Jump(d) => (UpCall::None, Some(d)),
-            &Instruction::JumpIfT(d) => (UpCall::None, if self.regs.t { Some(d) } else { None }),
-        }
-    }
-}
-
-#[derive(Debug,Clone)]
-pub struct StateBuilder {
-    pub mem_size: usize,
-    pub regs: Registers,
-}
-
-impl Default for StateBuilder {
-    fn default() -> StateBuilder {
-        StateBuilder {
-            mem_size: 256usize,
-            regs: Default::default(),
-        }
-    }
-}
-
-impl StateBuilder {
-    pub fn with_mem_size(self, sz: usize) -> StateBuilder {
-        StateBuilder { mem_size: sz, ..self }
-    }
-
-    pub fn with_regs(self, regs: Registers) -> StateBuilder {
-        StateBuilder { regs: regs, ..self }
-    }
-
-    pub fn build(self) -> State {
-        State {
-            mem: iter::repeat(0isize).take(self.mem_size).collect(),
-            regs: self.regs,
-        }
-    }
-}
-
-#[derive(Debug,Clone)]
-pub struct Program {
-    pub instrs: Vec<Instruction>,
-}
-
-impl Parser for Program {
-    fn parse(src: &str) -> Result<Program, ParseError> {
-        let mut instrs: Vec<Instruction> = Vec::new();
-        for line in src.lines() {
-            match Instruction::parse(line) {
-                Ok(i) => instrs.push(i),
-                Err(ParseError::Empty) => (),
-                Err(e) => return Err(e),
+impl Externals for Upcaller {
+    fn invoke_index(
+        &mut self,
+        index: usize,
+        args: RuntimeArgs,
+    ) -> Result<Option<RuntimeValue>, Trap> {
+        Err(Trap::new(TrapKind::Host(Box::new(match FromPrimitive::from_usize(index).expect("Tried to invoke a function that doesn't exist!") {
+            UpcallId::Scan => {
+                Upcall::Scan(args.nth_checked::<F32>(0)?.to_float(), args.nth_checked::<F32>(1)?.to_float(), Arc::new(Mutex::new(None)))
             }
-        }
-        Ok(Program{
-            instrs: instrs,
-        })
+            UpcallId::Fire => {
+                Upcall::Fire
+            }
+            UpcallId::Aim => {
+                Upcall::Aim(args.nth_checked::<F32>(0)?.to_float())
+            }
+            UpcallId::Turn => {
+                Upcall::Turn(args.nth_checked::<F32>(0)?.to_float())
+            }
+            UpcallId::GPSX => {
+                Upcall::GPSX(Arc::new(Mutex::new(None)))
+            }
+            UpcallId::GPSY => {
+                Upcall::GPSY(Arc::new(Mutex::new(None)))
+            }
+            UpcallId::Temp => {
+                Upcall::Temp(Arc::new(Mutex::new(None)))
+            }
+            UpcallId::Forward => {
+                Upcall::Forward
+            }
+            UpcallId::Explode => {
+                Upcall::Explode
+            }
+            UpcallId::Yield => {
+                Upcall::None
+            }
+        }))))
     }
 }
 
-#[derive(Debug,Clone)]
-pub struct VMConfiguration {
-    pub steps: usize,
-}
-
-impl Default for VMConfiguration {
-    fn default() -> VMConfiguration {
-        VMConfiguration {
-            steps: 30,
-        }
-    }
-}
-
-#[derive(Debug,Clone)]
 pub struct VM {
-    pub config: VMConfiguration,
-    pub state: State,
-    pub prog: Program,
-    pub pc: usize,
+    wasm_func: Box<FuncInvocation<'static>>,
+    externals: Upcaller,
+    state: VMState,
+}
+
+enum VMState {
+    Ready,
+    Waiting(Upcall),
 }
 
 impl VM {
-    pub fn new(p: Program, s: State) -> VM {
-        VM {
-            config: Default::default(),
-            state: s,
-            prog: p,
-            pc: 0usize,
+    pub fn new(program: Vec<u8>) -> Result<Self, wasmi::Error> {
+        let mut externals = Upcaller {};
+        let module = wasmi::Module::from_buffer(&program)?;
+        let instance = ModuleInstance::new(&module, &ImportsBuilder::new().with_resolver("env", &externals))?;
+        if let Some(ExternVal::Func(fr)) = instance.not_started_instance().export_by_name(&"tank") {
+            let mut invocation = Box::new(FuncInstance::invoke_resumable(&fr, vec![]).expect("failed to invoke function!"));
+            let result = invocation.start_execution_until(&mut externals, Some(0));
+            loop {  // Not a real loop, just something we can break out of
+                if let Err(ResumableError::Trap(t)) = result { 
+                    if let TrapKind::TooManyInstructions = t.kind() {
+                        break;
+                    }
+                }
+                panic!("Invocation of WebAssembly failed before any steps were executed");
+            }
+            Ok(VM {
+                wasm_func: invocation,
+                externals,
+                state: VMState::Ready,
+            })
+        } else {
+            Err(wasmi::Error::Instantiation("Entry point `tank` was not found".into()))
         }
     }
 
-    pub fn run(&mut self) -> UpCall {
-        for _step in 0..self.config.steps {
-            if self.pc >= self.prog.instrs.len() {
-                self.pc = 0
-            }
-            let (upcall, offset) = self.state.exec(&self.prog.instrs[self.pc]);
-            let (mut pc, _) = self.pc.overflowing_add(1usize);
-            if let Some(i) = offset {
-                if i >= 0 {
-                    pc = self.pc.saturating_add(i as usize);
-                } else {
-                    pc = self.pc.saturating_sub((-i) as usize);
+    pub fn begin_step(&mut self) {
+        self.wasm_func.reset_counter();
+    }
+
+    pub fn counter(&self) -> isize {
+        self.wasm_func.counter()
+    }
+
+    pub fn add_counter(&mut self, addend: isize) {
+        self.wasm_func.add_counter(addend);
+    }
+
+    pub fn set_counter(&mut self, counter: isize) {
+        self.wasm_func.set_counter(counter);
+    }
+
+    pub fn run_until(&mut self, max_count: Option<isize>) -> Upcall {
+        let val = match &self.state {
+            VMState::Ready                           => None,
+            VMState::Waiting(Upcall::None)           => None,
+            VMState::Waiting(Upcall::Scan(_, _, v))  => Some(RuntimeValue::I64(i64::from_ne_bytes((*v.lock().unwrap()).expect("No value was returned by upcall").to_ne_bytes()))),
+            VMState::Waiting(Upcall::Fire)           => None,
+            VMState::Waiting(Upcall::Aim(_))         => None,
+            VMState::Waiting(Upcall::Turn(_))        => None,
+            VMState::Waiting(Upcall::GPSX(v))        => Some(RuntimeValue::F32(F32::from_float(v.lock().unwrap().expect("No value was returned by upcall")))),
+            VMState::Waiting(Upcall::GPSY(v))        => Some(RuntimeValue::F32(F32::from_float(v.lock().unwrap().expect("No value was returned by upcall")))),
+            VMState::Waiting(Upcall::Temp(v))        => Some(RuntimeValue::I32(v.lock().unwrap().expect("No value was returned by upcall"))),
+            VMState::Waiting(Upcall::Forward)        => None,
+            VMState::Waiting(Upcall::Explode)        => None,
+        };
+        let result = self.wasm_func.resume_execution_until(val, &mut self.externals, max_count);
+        match result {
+            Err(ResumableError::Trap(t))  => {
+                match t.kind() {
+                    TrapKind::TooManyInstructions => {
+                        Upcall::None
+                    },
+                    TrapKind::Host(h) => {
+                        let uc = h.downcast_ref::<Upcall>().unwrap().clone();
+                        self.state = VMState::Waiting(uc.clone());
+                        uc
+                    }
+                    _ => Upcall::Explode,
                 }
-            }
-            self.pc = pc;
-            match upcall {
-                UpCall::None => continue,
-                v => return v,
-            }
+            },
+            _ => Upcall::Explode,
         }
-        UpCall::None
     }
 }
+
+// TODO: remove derive(Clone)s that necessitate this.
+impl Clone for VM {
+    fn clone(&self) -> Self {
+        todo!("You cannot clone a VM yet -- need to remove derive(Clone)s that force an implementation at all");
+    }
+}
+
+impl core::fmt::Debug for VM {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "opaque VM")?;
+        Ok(())
+    }
+}
+

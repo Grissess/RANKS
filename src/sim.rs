@@ -1,12 +1,15 @@
-use std::sync::RwLock;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use std::cell::RefCell;
 
 use serde::{Serialize, Serializer};
 
-use ::vm::*;
-use ::space::*;
+use space::*;
+use vm::*;
+
+// TODO: make this not a constant
+pub const INSTRS_PER_STEP: usize = 30;
 
 pub type Team = u8;
 
@@ -14,128 +17,182 @@ pub trait Entity {
     fn step(&mut self, world: &World);
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct Tank {
     pub pos: Pair,
     pub aim: f32,
     pub angle: f32,
     pub team: Team,
-    pub temp: isize,
+    pub temp: i32,
     pub vm: VM,
-    pub dead: bool,
+    pub state: TankState,
+    pub timers: [usize; 1],
+}
+
+#[derive(Debug, Clone)]
+pub enum TankState {
+    Dead,
+    Free,
+    Pending(Upcall),
+}
+
+impl PartialEq for TankState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TankState::Dead, TankState::Dead) => true,
+            (TankState::Free, TankState::Free) => true,
+            _ => false,
+        }
+    }
 }
 
 // Identity type; needed to make Serdes work properly with Arcs.
-#[derive(Debug,Clone)]
-pub struct Identity<T> (T);
+#[derive(Debug, Clone)]
+pub struct Identity<T>(T);
 
-impl<T> std::ops::Deref for Identity<T>
-{
+impl<T> std::ops::Deref for Identity<T> {
     type Target = T;
 
-    fn deref(&self) -> &Self::Target
-    {
+    fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl<T, U> Serialize for Identity<T>
-where T: std::ops::Deref<Target=U>, U: Serialize
+where
+    T: std::ops::Deref<Target = U>,
+    U: Serialize,
 {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-        where S: Serializer
+    where
+        S: Serializer,
     {
         self.0.serialize(s)
     }
 }
 
 #[derive(Serialize)]
-struct TankSerInfo
-{
+struct TankSerInfo {
     pos: Pair,
     angle: f32,
+    aim: f32,
+    temp: i32,
     team: Team,
     dead: bool,
 }
 
-impl Serialize for Tank
-{
+impl Serialize for Tank {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-        where S: Serializer
+    where
+        S: Serializer,
     {
-        let info = TankSerInfo
-        {
+        let info = TankSerInfo {
             pos: self.pos,
             angle: self.angle,
+            aim: self.aim,
+            temp: self.temp,
             team: self.team,
-            dead: self.dead,
+            dead: self.state == TankState::Dead,
         };
         info.serialize(s)
     }
 }
 
-// impl Serialize for <Tank>
-// {
-//     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-//         where S: Serializer
-//     {
-//         self.serialize(s);
-//     }
-// }
-
 impl Tank {
-    pub fn apply_heat(&mut self, heat: isize) {
+    pub fn apply_heat(&mut self, heat: i32) {
         self.temp = self.temp.saturating_add(heat);
-        if self.temp < 0 { self.temp = 0; }
+        if self.temp < 0 {
+            self.temp = 0;
+        }
     }
 }
 
 impl Entity for Tank {
     fn step(&mut self, world: &World) {
+        fn timer(uc: &Upcall) -> Option<(usize, usize)> {
+            match uc {
+                uc if uc.alters_world() => Some((0, INSTRS_PER_STEP)),
+                _ => None,
+            }
+        }
         self.apply_heat(world.config.idle_heat);
-        match self.vm.run() {
-            UpCall::None | UpCall::Yield => (),
-            UpCall::Scan => {
-                let bounds = if self.vm.state.regs.a < self.vm.state.regs.b {
-                    (self.vm.state.regs.a, self.vm.state.regs.b)
-                } else {
-                    (self.vm.state.regs.b, self.vm.state.regs.a)
-                };
-                let bounds = (
-                    Heading::from(bounds.0),
-                    Heading::from(bounds.1),
-                );
-                let (a, b) = world.scan(self.pos, self.team, bounds);
-                self.vm.state.regs.a = a as isize;
-                self.vm.state.regs.b = b as isize;
-            },
-            UpCall::Fire => {
-                self.apply_heat(world.config.shoot_heat);
-                world.bullets.write().unwrap().push(Identity(Arc::new(RwLock::new(Bullet{
-                    pos: self.pos + Pair::polar(self.aim) * world.config.bullet_s,
-                    vel: Pair::polar(self.aim) * world.config.bullet_v,
-                    dead: false,
-                }))));
-            },
-            UpCall::Aim(hd) => {
-                self.aim = hd.0;
-            },
-            UpCall::Turn(hd) => {
-                self.angle = hd.0;
-            },
-            UpCall::GPS => {
-                self.vm.state.regs.a = (self.pos.x as isize) / 4;
-                self.vm.state.regs.b = (self.pos.y as isize) / 4;
-            },
-            UpCall::Temp => {
-                self.vm.state.regs.a = self.temp;
-            },
-            UpCall::Move => {
-                self.pos = self.pos + Pair::polar(self.angle) * world.config.tank_v;
-            },
-            UpCall::Explode => {
-                world.explode(self.pos, world.config.explode_rad);
-            },
+        self.vm.begin_step();
+        loop {
+            for timer in &mut self.timers {
+                *timer = timer.saturating_sub(INSTRS_PER_STEP);
+            }
+            let uc;
+            match &mut self.state {
+                TankState::Free => { uc = self.vm.run_until(Some(INSTRS_PER_STEP as isize)); },
+                TankState::Dead => break,
+                TankState::Pending(_) => {
+                    let mut newstate = TankState::Free;
+                    core::mem::swap(&mut self.state, &mut newstate);
+                    if let TankState::Pending(upcall) = newstate {
+                        uc = upcall;
+                    } else {
+                        unreachable!();
+                    }
+                }
+            }
+            match timer(&uc) {
+                None => (),
+                Some((idx, maxtime)) => {
+                    if self.timers[idx] >= INSTRS_PER_STEP {
+                        self.state = TankState::Pending(uc);
+                        break;
+                    } else {
+                        let counter = isize::max(self.timers[idx] as isize, self.vm.counter());
+                        self.vm.set_counter(counter);
+                        self.timers[idx] = self.vm.counter() as usize + maxtime;
+                    }
+                }
+            }
+            match uc {
+                Upcall::Scan(hl, hu, rv) => {
+                    let bounds = if hl < hu {
+                        (hl, hu)
+                    } else {
+                        (hu, hl)
+                    };
+                    let (us, them) = world.scan(self.pos, self.team, bounds);
+                    *rv.lock().unwrap() = Some(((us as u64) << 32) | them as u64);
+                },
+                Upcall::Fire => {
+                    self.apply_heat(world.config.shoot_heat);
+                    world
+                        .bullets
+                        .write()
+                        .unwrap()
+                        .push(Identity(Arc::new(RwLock::new(Bullet {
+                            pos: self.pos + Pair::polar(self.aim) * world.config.bullet_s,
+                            vel: Pair::polar(self.aim) * world.config.bullet_v,
+                            dead: false,
+                        }))));
+                }
+                Upcall::Aim(hd) => {
+                    self.aim = hd;
+                }
+                Upcall::Turn(hd) => {
+                    self.angle = hd;
+                }
+                Upcall::GPSX(rv) => {
+                    *rv.lock().unwrap() = Some(self.pos.x);
+                }
+                Upcall::GPSY(rv) => {
+                    *rv.lock().unwrap() = Some(self.pos.y);
+                }
+                Upcall::Temp(rv) => {
+                    *rv.lock().unwrap() = Some(self.temp);
+                }
+                Upcall::Forward => {
+                    self.pos = self.pos + Pair::polar(self.angle) * world.config.tank_v;
+                }
+                Upcall::Explode => {
+                    world.explode(self.pos, world.config.explode_rad);
+                }
+                Upcall::None => break,
+            }
         }
         if self.temp >= world.config.death_heat {
             world.explode(self.pos, world.config.explode_rad);
@@ -143,7 +200,7 @@ impl Entity for Tank {
     }
 }
 
-#[derive(Debug,Clone,Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Bullet {
     pub pos: Pair,
     pub vel: Pair,
@@ -156,12 +213,12 @@ impl Entity for Bullet {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct Configuration {
-    pub shoot_heat: isize,
-    pub idle_heat: isize,
-    pub move_heat: isize,
-    pub death_heat: isize,
+    pub shoot_heat: i32,
+    pub idle_heat: i32,
+    pub move_heat: i32,
+    pub death_heat: i32,
     pub bullet_v: f32,
     pub bullet_s: f32,
     pub hit_rad: f32,
@@ -196,46 +253,58 @@ impl Configuration {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct World {
     pub config: Configuration,
     pub tanks: Arc<RwLock<Vec<Identity<Arc<RwLock<Tank>>>>>>,
     pub bullets: Arc<RwLock<Vec<Identity<Arc<RwLock<Bullet>>>>>>,
-    action_queue: RefCell<Vec<WorldAction>>
+    action_queue: RefCell<Vec<WorldAction>>,
 }
 
 #[derive(Clone, Debug)]
-enum WorldAction
-{
-    Explode(Pair, f32),  // Center and radius of explosion
+enum WorldAction {
+    Explode(Pair, f32), // Center and radius of explosion
 }
 
 impl World {
     pub fn add_tank(&mut self, tank: Tank) {
-        self.tanks.write().unwrap().push(Identity(Arc::new(RwLock::new(tank))));
+        self.tanks
+            .write()
+            .unwrap()
+            .push(Identity(Arc::new(RwLock::new(tank))));
     }
 
     pub fn step(&mut self) {
         // All entity steps
         for t in self.tanks.read().unwrap().iter() {
-            if !t.read().unwrap().dead {
+            if t.read().unwrap().state != TankState::Dead {
                 t.write().unwrap().step(&self);
             }
         }
         for b in self.bullets.read().unwrap().iter() {
             b.write().unwrap().step(&self);
         }
-        
+
         // All collisions
         enum EntityRef {
             Tank(Arc<RwLock<Tank>>),
             Bullet(Arc<RwLock<Bullet>>),
         }
         let mut root: QuadTreeNode<EntityRef> = QuadTreeBuilder::from_bound(AABB::over_points(
-                self.tanks.read().unwrap().iter().map(|t| t.read().unwrap().pos).chain(
-                    self.bullets.read().unwrap().iter().map(|b| b.read().unwrap().pos)
-                )
-        )).build();
+            self.tanks
+                .read()
+                .unwrap()
+                .iter()
+                .map(|t| t.read().unwrap().pos)
+                .chain(
+                    self.bullets
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .map(|b| b.read().unwrap().pos),
+                ),
+        ))
+        .build();
 
         for t in self.tanks.read().unwrap().iter() {
             root.add_pt((t.read().unwrap().pos, EntityRef::Tank(Arc::clone(t))));
@@ -245,14 +314,23 @@ impl World {
         }
 
         for t in self.tanks.read().unwrap().iter() {
-            let v: Vec<&EntityRef> = root.query(AABB::around(t.read().unwrap().pos, Pair::both(self.config.hit_rad))).map(|(_, r)| r).collect();
-            if v.iter().filter(|r| match r {
-                &EntityRef::Tank(ref t) => !t.read().unwrap().dead,
-                &EntityRef::Bullet(ref b) => !b.read().unwrap().dead,
-            }).any(|_| true) {
+            let v: Vec<&EntityRef> = root
+                .query(AABB::around(
+                    t.read().unwrap().pos,
+                    Pair::both(self.config.hit_rad),
+                ))
+                .map(|(_, r)| r)
+                .collect();
+            if v.iter()
+                .filter(|r| match r {
+                    &EntityRef::Tank(ref t) => t.read().unwrap().state != TankState::Dead,
+                    &EntityRef::Bullet(ref b) => !b.read().unwrap().dead,
+                })
+                .any(|_| true)
+            {
                 for r in v {
                     match r {
-                        &EntityRef::Tank(ref t) => t.write().unwrap().dead = true,
+                        &EntityRef::Tank(ref t) => t.write().unwrap().state = TankState::Dead,
                         &EntityRef::Bullet(ref b) => b.write().unwrap().dead = true,
                     }
                 }
@@ -260,40 +338,59 @@ impl World {
         }
 
         let mut queue = self.action_queue.borrow_mut();
-        while let Some(action) = queue.pop()
-        {
-            match action
-            {
+        while let Some(action) = queue.pop() {
+            match action {
                 WorldAction::Explode(pos, rad) => self.do_explode(pos, rad),
             }
         }
 
         // Clean the bullet list, now that we can
-        let bullets = self.bullets.read().unwrap().iter().filter(|b| !b.read().unwrap().dead).cloned().collect();
+        let bullets = self
+            .bullets
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|b| !b.read().unwrap().dead)
+            .cloned()
+            .collect();
         *self.bullets.write().unwrap() = bullets;
     }
 
     pub fn finished(&self) -> bool {
-        self.tanks.read().unwrap().iter().all(|t| t.read().unwrap().dead)
+        self.tanks
+            .read()
+            .unwrap()
+            .iter()
+            .all(|t| t.read().unwrap().state == TankState::Dead)
     }
 
-    pub fn scan(&self, pos: Pair, tm: Team, bounds: (Heading, Heading)) -> (usize, usize) {
-        self.tanks.read().unwrap().iter()
+    pub fn scan(&self, pos: Pair, tm: Team, bounds: (f32, f32)) -> (u32, u32) {
+        self.tanks
+            .read()
+            .unwrap()
+            .iter()
             .map(|tank| (tank, (tank.read().unwrap().pos + (-pos)).ang()))
-            .filter(|(_t, a)| *a >= (bounds.0).0 && *a < (bounds.1).0)
-            .fold((0usize, 0usize), |(us, them), (t, _a)| if t.read().unwrap().team == tm { (us + 1, them) } else { (us, them + 1) })
+            .filter(|(_t, a)| *a >= bounds.0 && *a < bounds.1)
+            .fold((0u32, 0u32), |(us, them), (t, _a)| {
+                if t.read().unwrap().team == tm {
+                    (us + 1, them)
+                } else {
+                    (us, them + 1)
+                }
+            })
     }
 
     fn do_explode(&self, pos: Pair, rad: f32) {
         for t in self.tanks.write().unwrap().iter_mut() {
             if (t.read().unwrap().pos + (-pos)).limag() <= rad {
-                t.write().unwrap().dead = true;
+                t.write().unwrap().state = TankState::Dead;
             }
         }
     }
 
-    pub fn explode(&self, pos: Pair, rad: f32)
-    {
-        self.action_queue.borrow_mut().push(WorldAction::Explode(pos, rad));
+    pub fn explode(&self, pos: Pair, rad: f32) {
+        self.action_queue
+            .borrow_mut()
+            .push(WorldAction::Explode(pos, rad));
     }
 }
