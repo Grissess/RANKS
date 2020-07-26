@@ -184,6 +184,9 @@ impl Entity for Tank {
                 Upcall::Forward => {
                     self.pos = self.pos + Pair::polar(self.angle) * world.config.tank_v;
                 }
+                Upcall::PostString(s) => {
+                    println!("tank posted: {}", s);
+                }
                 Upcall::Explode => {
                     println!("tank commiting suicide!");
                     world.explode(self.pos, world.config.explode_rad);

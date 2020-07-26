@@ -92,6 +92,7 @@ extern float gpsx();
 extern float gpsy();
 extern void forward();
 extern void explode();
+extern void post_string(char*);
 extern void yield();
 
 #endif

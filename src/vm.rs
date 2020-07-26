@@ -7,7 +7,7 @@ use wasmi::{
     nan_preserving_float::{F32, F64},
     ExternVal, Externals, FuncInstance, FuncInvocation, FuncRef, HostError, ImportsBuilder,
     ModuleImportResolver, ModuleInstance, ResumableError, RuntimeArgs, RuntimeValue, Signature,
-    Trap, TrapKind, ValueType,
+    Trap, TrapKind, ValueType, MemoryRef,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +38,7 @@ impl HostCall {
             "temp" => Ok(HostCall::Upcall(UpcallId::Temp)),
             "forward" => Ok(HostCall::Upcall(UpcallId::Forward)),
             "explode" => Ok(HostCall::Upcall(UpcallId::Explode)),
+            "post_string" => Ok(HostCall::Upcall(UpcallId::PostString)),
             "yield" => Ok(HostCall::Upcall(UpcallId::Yield)),
             "abs_float" => Ok(HostCall::UnaryOpF32(UnaryOp::Abs)),
             "acos_float" => Ok(HostCall::UnaryOpF32(UnaryOp::Acos)),
@@ -132,6 +133,7 @@ impl HostCall {
             HostCall::Upcall(UpcallId::Temp) => (vec![], Some(ValueType::I32)),
             HostCall::Upcall(UpcallId::Forward) => (vec![], None),
             HostCall::Upcall(UpcallId::Explode) => (vec![], None),
+            HostCall::Upcall(UpcallId::PostString) => (vec![ValueType::I32], None),
             HostCall::Upcall(UpcallId::Yield) => (vec![], None),
             HostCall::UnaryOpF32(_) => (vec![ValueType::F32], Some(ValueType::F32)),
             HostCall::BinaryOpF32(_) => {
@@ -186,6 +188,7 @@ enum UpcallId {
     Temp,
     Forward,
     Explode,
+    PostString,
     Yield, // Must be last, or else change the constant below
 }
 
@@ -342,6 +345,7 @@ pub enum Upcall {
     GPSY(Arc<Mutex<Option<f32>>>),
     Temp(Arc<Mutex<Option<i32>>>),
     Forward,
+    PostString(String),
     Explode,
 }
 
@@ -357,6 +361,7 @@ impl Upcall {
             Upcall::GPSY(_) => false,
             Upcall::Temp(_) => false,
             Upcall::Forward => true,
+            Upcall::PostString(_) => false,
             Upcall::Explode => true,
         }
     }
@@ -374,6 +379,7 @@ impl core::fmt::Display for Upcall {
             Upcall::GPSY(_) => write!(f, "get GPS Y")?,
             Upcall::Temp(_) => write!(f, "get temperature")?,
             Upcall::Forward => write!(f, "move forward")?,
+            Upcall::PostString(s) => write!(f, "post {:?}", s)?,
             Upcall::Explode => write!(f, "explode")?,
         }
         Ok(())
@@ -383,9 +389,14 @@ impl core::fmt::Display for Upcall {
 impl HostError for Upcall {}
 
 #[derive(Clone, Debug)]
-struct HostFuncs {}
+struct HostImports {}
 
-impl ModuleImportResolver for HostFuncs {
+#[derive(Clone, Debug)]
+struct HostFuncs {
+    memory: MemoryRef,
+}
+
+impl ModuleImportResolver for HostImports {
     fn resolve_func(
         &self,
         field_name: &str,
@@ -430,6 +441,28 @@ impl Externals for HostFuncs {
                 UpcallId::Temp => Upcall::Temp(Arc::new(Mutex::new(None))),
                 UpcallId::Forward => Upcall::Forward,
                 UpcallId::Explode => Upcall::Explode,
+                UpcallId::PostString => {
+                    let ptr = u32::from_ne_bytes(args.nth_checked::<i32>(0)?.to_ne_bytes());
+                    let mut end = ptr;
+                    while {
+                        match self.memory.get_value::<u8>(end) {
+                            Ok(0) => false,
+                            Ok(_) => true,
+                            Err(_) => return Err(Trap::new(TrapKind::Host(Box::new(Upcall::Explode)))),
+                        }
+                    } {
+                        end += 1;
+                    }
+                    match self.memory.get(ptr, (end - ptr) as usize) {
+                        Ok(v) => {
+                            match String::from_utf8(v) {
+                                Ok(s) => Upcall::PostString(s),
+                                Err(_) => Upcall::Explode,
+                            }
+                        },
+                        Err(_) => Upcall::Explode,
+                    }
+                }
                 UpcallId::Yield => Upcall::None,
             })))),
             HostCall::UnaryOpF32(op) | HostCall::UnaryOpF64(op) => {
@@ -456,12 +489,20 @@ enum VMState {
 
 impl VM {
     pub fn new(program: Vec<u8>) -> Result<Self, wasmi::Error> {
-        let mut externals = HostFuncs {};
+        let imports = HostImports {};
         let module = wasmi::Module::from_buffer(&program)?;
         let instance = ModuleInstance::new(
             &module,
-            &ImportsBuilder::new().with_resolver("env", &externals),
+            &ImportsBuilder::new().with_resolver("env", &imports),
         )?;
+        let memory = instance.not_started_instance().export_by_name("memory")
+            .ok_or(wasmi::Error::Instantiation("Could not access module memory; is it named `memory`?".into()))?
+            .as_memory()
+            .ok_or(wasmi::Error::Instantiation("Export `memory` is not a memory!".into()))?
+            .clone();
+        let mut externals = HostFuncs {
+            memory
+        };
         if let Some(ExternVal::Func(fr)) = instance.not_started_instance().export_by_name(&"tank") {
             let mut invocation = Box::new(FuncInstance::invoke_resumable(&fr, vec![])?);
             let result = invocation.start_execution_until(&mut externals, Some(0));
@@ -472,7 +513,9 @@ impl VM {
                         break;
                     }
                 }
-                panic!("Invocation of WebAssembly failed before any steps were executed");
+                return Err(wasmi::Error::Instantiation(
+                        "Invocation of WebAssembly failed before any steps were executed".into(),
+                        ))
             }
             Ok(VM {
                 wasm_func: invocation,
@@ -524,6 +567,7 @@ impl VM {
                 v.lock().unwrap().expect("No value was returned by upcall"),
             )),
             VMState::Waiting(Upcall::Forward) => None,
+            VMState::Waiting(Upcall::PostString(_)) => None,
             VMState::Waiting(Upcall::Explode) => None,
         };
         //println!("running VM. state: {:?}. returned value: {:?}. expected value type: {:?}.", self.state, val, self.wasm_func.resumable_value_type());

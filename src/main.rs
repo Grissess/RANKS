@@ -33,8 +33,6 @@ fn main() {
         .collect();
     let progcount = progs.len();
 
-    eprintln!("{:?}", progs);
-
     let mut world = Configuration::default().build();
     for (idx, prog) in progs.into_iter().enumerate() {
         let vm = VM::new(prog);
