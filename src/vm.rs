@@ -39,6 +39,12 @@ impl HostCall {
             "forward" => Ok(HostCall::Upcall(UpcallId::Forward)),
             "explode" => Ok(HostCall::Upcall(UpcallId::Explode)),
             "post_string" => Ok(HostCall::Upcall(UpcallId::PostString)),
+            "post_int32" => Ok(HostCall::Upcall(UpcallId::PostI32)),
+            "post_uint32" => Ok(HostCall::Upcall(UpcallId::PostU32)),
+            "post_int64" => Ok(HostCall::Upcall(UpcallId::PostI64)),
+            "post_uint64" => Ok(HostCall::Upcall(UpcallId::PostU64)),
+            "post_float" => Ok(HostCall::Upcall(UpcallId::PostF32)),
+            "post_double" => Ok(HostCall::Upcall(UpcallId::PostF64)),
             "yield" => Ok(HostCall::Upcall(UpcallId::Yield)),
             "abs_float" => Ok(HostCall::UnaryOpF32(UnaryOp::Abs)),
             "acos_float" => Ok(HostCall::UnaryOpF32(UnaryOp::Acos)),
@@ -134,6 +140,12 @@ impl HostCall {
             HostCall::Upcall(UpcallId::Forward) => (vec![], None),
             HostCall::Upcall(UpcallId::Explode) => (vec![], None),
             HostCall::Upcall(UpcallId::PostString) => (vec![ValueType::I32], None),
+            HostCall::Upcall(UpcallId::PostI32) => (vec![ValueType::I32], None),
+            HostCall::Upcall(UpcallId::PostI64) => (vec![ValueType::I32], None),
+            HostCall::Upcall(UpcallId::PostU32) => (vec![ValueType::I64], None),
+            HostCall::Upcall(UpcallId::PostU64) => (vec![ValueType::I64], None),
+            HostCall::Upcall(UpcallId::PostF32) => (vec![ValueType::F32], None),
+            HostCall::Upcall(UpcallId::PostF64) => (vec![ValueType::F64], None),
             HostCall::Upcall(UpcallId::Yield) => (vec![], None),
             HostCall::UnaryOpF32(_) => (vec![ValueType::F32], Some(ValueType::F32)),
             HostCall::BinaryOpF32(_) => {
@@ -189,6 +201,12 @@ enum UpcallId {
     Forward,
     Explode,
     PostString,
+    PostI32,
+    PostU32,
+    PostI64,
+    PostU64,
+    PostF32,
+    PostF64,
     Yield, // Must be last, or else change the constant below
 }
 
@@ -346,6 +364,12 @@ pub enum Upcall {
     Temp(Arc<Mutex<Option<i32>>>),
     Forward,
     PostString(String),
+    PostI32(i32),
+    PostU32(u32),
+    PostI64(i64),
+    PostU64(u64),
+    PostF32(f32),
+    PostF64(f64),
     Explode,
 }
 
@@ -362,6 +386,12 @@ impl Upcall {
             Upcall::Temp(_) => false,
             Upcall::Forward => true,
             Upcall::PostString(_) => false,
+            Upcall::PostI32(_) => false,
+            Upcall::PostU32(_) => false,
+            Upcall::PostI64(_) => false,
+            Upcall::PostU64(_) => false,
+            Upcall::PostF32(_) => false,
+            Upcall::PostF64(_) => false,
             Upcall::Explode => true,
         }
     }
@@ -380,6 +410,12 @@ impl core::fmt::Display for Upcall {
             Upcall::Temp(_) => write!(f, "get temperature")?,
             Upcall::Forward => write!(f, "move forward")?,
             Upcall::PostString(s) => write!(f, "post {:?}", s)?,
+            Upcall::PostI32(s) => write!(f, "post {:?}", s)?,
+            Upcall::PostU32(s) => write!(f, "post {:?}", s)?,
+            Upcall::PostI64(s) => write!(f, "post {:?}", s)?,
+            Upcall::PostU64(s) => write!(f, "post {:?}", s)?,
+            Upcall::PostF32(s) => write!(f, "post {:?}", s)?,
+            Upcall::PostF64(s) => write!(f, "post {:?}", s)?,
             Upcall::Explode => write!(f, "explode")?,
         }
         Ok(())
@@ -462,6 +498,24 @@ impl Externals for HostFuncs {
                         },
                         Err(_) => Upcall::Explode,
                     }
+                }
+                UpcallId::PostI32 => {
+                    Upcall::PostI32(args.nth_checked::<i32>(0)?)
+                }
+                UpcallId::PostU32 => {
+                    Upcall::PostU32(u32::from_ne_bytes(args.nth_checked::<i32>(0)?.to_ne_bytes()))
+                }
+                UpcallId::PostI64 => {
+                    Upcall::PostI64(args.nth_checked::<i64>(0)?)
+                }
+                UpcallId::PostU64 => {
+                    Upcall::PostU64(u64::from_ne_bytes(args.nth_checked::<i64>(0)?.to_ne_bytes()))
+                }
+                UpcallId::PostF32 => {
+                    Upcall::PostF32(args.nth_checked::<F32>(0)?.to_float())
+                }
+                UpcallId::PostF64 => {
+                    Upcall::PostF64(args.nth_checked::<F64>(0)?.to_float())
                 }
                 UpcallId::Yield => Upcall::None,
             })))),
@@ -568,6 +622,12 @@ impl VM {
             )),
             VMState::Waiting(Upcall::Forward) => None,
             VMState::Waiting(Upcall::PostString(_)) => None,
+            VMState::Waiting(Upcall::PostI32(_)) => None,
+            VMState::Waiting(Upcall::PostU32(_)) => None,
+            VMState::Waiting(Upcall::PostI64(_)) => None,
+            VMState::Waiting(Upcall::PostU64(_)) => None,
+            VMState::Waiting(Upcall::PostF32(_)) => None,
+            VMState::Waiting(Upcall::PostF64(_)) => None,
             VMState::Waiting(Upcall::Explode) => None,
         };
         //println!("running VM. state: {:?}. returned value: {:?}. expected value type: {:?}.", self.state, val, self.wasm_func.resumable_value_type());

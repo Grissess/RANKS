@@ -185,8 +185,26 @@ impl Entity for Tank {
                     self.pos = self.pos + Pair::polar(self.angle) * world.config.tank_v;
                 }
                 Upcall::PostString(s) => {
-                    println!("tank posted: {}", s);
+                    println!("tank posted string: {}", s);
                 }
+                Upcall::PostI32(s) => {
+                    println!("tank posted i32: {}", s);
+                },
+                Upcall::PostU32(s) => {
+                    println!("tank posted u32: {}", s);
+                },
+                Upcall::PostI64(s) => {
+                    println!("tank posted i64: {}", s);
+                },
+                Upcall::PostU64(s) => {
+                    println!("tank posted u64: {}", s);
+                },
+                Upcall::PostF32(s) => {
+                    println!("tank posted f32: {}", s);
+                },
+                Upcall::PostF64(s) => {
+                    println!("tank posted f64: {}", s);
+                },
                 Upcall::Explode => {
                     println!("tank commiting suicide!");
                     world.explode(self.pos, world.config.explode_rad);
