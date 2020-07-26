@@ -93,6 +93,12 @@ extern float gpsy();
 extern void forward();
 extern void explode();
 extern void post_string(char*);
+extern void post_int32(int32_t);
+extern void post_uint32(uint32_t);
+extern void post_int64(int64_t);
+extern void post_uint64(uint64_t);
+extern void post_float(float);
+extern void post_double(double);
 extern void yield();
 
 #endif
