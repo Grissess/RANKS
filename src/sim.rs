@@ -8,9 +8,6 @@ use serde::{Serialize, Serializer};
 use space::*;
 use vm::*;
 
-// TODO: make this not a constant
-pub const INSTRS_PER_STEP: usize = 30;
-
 pub type Team = u8;
 
 pub trait Entity {
@@ -20,6 +17,7 @@ pub trait Entity {
 #[derive(Debug, Clone)]
 pub struct Tank {
     pub pos: Pair,
+    pub instrs_per_step: usize,
     pub aim: f32,
     pub angle: f32,
     pub team: Team,
@@ -109,21 +107,23 @@ impl Tank {
 
 impl Entity for Tank {
     fn step(&mut self, world: &World) {
-        fn timer(uc: &Upcall) -> Option<(usize, usize)> {
+        fn timer(uc: &Upcall, instrs_per_step: usize) -> Option<(usize, usize)> {
             match uc {
-                uc if uc.alters_world() => Some((0, INSTRS_PER_STEP)),
+                uc if uc.alters_world() => Some((0, instrs_per_step)),
                 _ => None,
             }
         }
         self.apply_heat(world.config.idle_heat);
         self.vm.begin_step();
+        for timer in &mut self.timers {
+            *timer = timer.saturating_sub(self.instrs_per_step);
+        }
         loop {
-            for timer in &mut self.timers {
-                *timer = timer.saturating_sub(INSTRS_PER_STEP);
-            }
             let uc;
             match &mut self.state {
-                TankState::Free => { uc = self.vm.run_until(Some(INSTRS_PER_STEP as isize)); },
+                TankState::Free => {
+                    uc = self.vm.run_until(Some(self.instrs_per_step as isize));
+                }
                 TankState::Dead => break,
                 TankState::Pending(_) => {
                     let mut newstate = TankState::Free;
@@ -135,10 +135,10 @@ impl Entity for Tank {
                     }
                 }
             }
-            match timer(&uc) {
+            match timer(&uc, self.instrs_per_step) {
                 None => (),
                 Some((idx, maxtime)) => {
-                    if self.timers[idx] >= INSTRS_PER_STEP {
+                    if self.timers[idx] >= self.instrs_per_step {
                         self.state = TankState::Pending(uc);
                         break;
                     } else {
@@ -150,14 +150,10 @@ impl Entity for Tank {
             }
             match uc {
                 Upcall::Scan(hl, hu, rv) => {
-                    let bounds = if hl < hu {
-                        (hl, hu)
-                    } else {
-                        (hu, hl)
-                    };
+                    let bounds = if hl < hu { (hl, hu) } else { (hu, hl) };
                     let (us, them) = world.scan(self.pos, self.team, bounds);
                     *rv.lock().unwrap() = Some(((us as u64) << 32) | them as u64);
-                },
+                }
                 Upcall::Fire => {
                     self.apply_heat(world.config.shoot_heat);
                     world
@@ -189,12 +185,15 @@ impl Entity for Tank {
                     self.pos = self.pos + Pair::polar(self.angle) * world.config.tank_v;
                 }
                 Upcall::Explode => {
+                    println!("tank commiting suicide!");
                     world.explode(self.pos, world.config.explode_rad);
+                    break;
                 }
                 Upcall::None => break,
             }
         }
         if self.temp >= world.config.death_heat {
+            println!("tank too hot!");
             world.explode(self.pos, world.config.explode_rad);
         }
     }
@@ -219,6 +218,7 @@ pub struct Configuration {
     pub idle_heat: i32,
     pub move_heat: i32,
     pub death_heat: i32,
+    pub instrs_per_step: usize,
     pub bullet_v: f32,
     pub bullet_s: f32,
     pub hit_rad: f32,
@@ -233,6 +233,7 @@ impl Default for Configuration {
             idle_heat: -2,
             move_heat: -2,
             death_heat: 300,
+            instrs_per_step: 30,
             bullet_v: 5.0,
             bullet_s: 30.0,
             hit_rad: 10.0,

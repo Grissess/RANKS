@@ -349,10 +349,10 @@ impl<'a, T> std::iter::IntoIterator for &'a mut QuadTreeChildren<T> {
 }
 
 impl<T> QuadTreeChildren<T> {
-    fn iter(&self) -> QuadTreeChildrenIter<T> {
+    pub fn iter(&self) -> QuadTreeChildrenIter<T> {
         self.into_iter()
     }
-    fn iter_mut(&mut self) -> QuadTreeChildrenIterMut<T> {
+    pub fn iter_mut(&mut self) -> QuadTreeChildrenIterMut<T> {
         self.into_iter()
     }
 }

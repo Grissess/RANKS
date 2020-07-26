@@ -43,13 +43,14 @@ fn main() {
                 pos: Pair::polar((idx as f32) / (progcount as f32) * 2.0 * ::std::f32::consts::PI)
                     * 0.75
                     * (WORLD_SIZE as f32),
-                    aim: 0.0,
-                    angle: 0.0,
-                    team: idx as Team,
-                    temp: 0,
-                    vm,
-                    state: TankState::Free,
-                    timers: [0],
+                aim: 0.0,
+                angle: 0.0,
+                team: idx as Team,
+                instrs_per_step: 30,
+                temp: 0,
+                vm,
+                state: TankState::Free,
+                timers: [0],
             }),
             Err(_) => continue,
         }
