@@ -12,13 +12,12 @@ use std::{env, fs};
 
 use serde::Serialize;
 
-use RANKS::sim::{Bullet, Configuration, Identity, Tank, TankState, Team};
+use RANKS::sim::{Bullet, Configuration, Identity, Tank, Team};
 use RANKS::space::Pair;
-use RANKS::vm::VM;
 
 const WORLD_SIZE: usize = 500;
 
-const DELAY_DURATION: Duration = Duration::from_millis(100);
+const DELAY_DURATION: Duration = Duration::from_millis(50);
 
 #[derive(Serialize)]
 struct UpdatePacket<'a> {
@@ -34,23 +33,18 @@ fn main() {
     let progcount = progs.len();
 
     let mut world = Configuration::default().build();
+    let config = world.config.clone();
     for (idx, prog) in progs.into_iter().enumerate() {
-        let vm = VM::new(prog);
-        match vm {
-            Ok(vm) => world.add_tank(Tank {
-                pos: Pair::polar((idx as f32) / (progcount as f32) * 2.0 * ::std::f32::consts::PI)
-                    * 0.75
-                    * (WORLD_SIZE as f32),
-                aim: 0.0,
-                angle: 0.0,
-                team: idx as Team,
-                instrs_per_step: 30,
-                temp: 0,
-                vm,
-                state: TankState::Free,
-                timers: [0],
-            }),
-            Err(_) => continue,
+        let tank = Tank::new(
+            Pair::polar((idx as f32) / (progcount as f32) * 2.0 * ::std::f32::consts::PI)
+            * 0.75
+            * (WORLD_SIZE as f32),
+            idx as Team,
+            prog,
+            config.clone(),
+            );
+        if let Ok(tank) = tank {
+            world.add_tank(tank);
         }
     }
 

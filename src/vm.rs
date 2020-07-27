@@ -10,9 +10,12 @@ use wasmi::{
     Trap, TrapKind, ValueType, MemoryRef,
 };
 
+use sim::Configuration;
+
 #[derive(Clone, Copy, Debug)]
 enum HostCall {
     Upcall(UpcallId),
+    Constant(ConstantId),
     UnaryOpF32(UnaryOp),
     BinaryOpF32(BinaryOp),
     UnaryOpF64(UnaryOp),
@@ -21,10 +24,11 @@ enum HostCall {
 
 const B0: usize = 0;
 const B1: usize = NUM_UPCALLS;
-const B2: usize = NUM_UPCALLS + NUM_UNOPS;
-const B3: usize = NUM_UPCALLS + NUM_UNOPS + NUM_BINOPS;
-const B4: usize = NUM_UPCALLS + 2 * NUM_UNOPS + NUM_BINOPS;
-const B5: usize = NUM_UPCALLS + 2 * NUM_UNOPS + 2 * NUM_BINOPS;
+const B2: usize = NUM_UPCALLS + NUM_CONSTANTS;
+const B3: usize = NUM_UPCALLS + NUM_CONSTANTS + NUM_UNOPS;
+const B4: usize = NUM_UPCALLS + NUM_CONSTANTS + NUM_UNOPS + NUM_BINOPS;
+const B5: usize = NUM_UPCALLS + NUM_CONSTANTS + 2 * NUM_UNOPS + NUM_BINOPS;
+const B6: usize = NUM_UPCALLS + NUM_CONSTANTS + 2 * NUM_UNOPS + 2 * NUM_BINOPS;
 
 impl HostCall {
     pub fn from_name(name: &str) -> Result<Self, ()> {
@@ -46,6 +50,16 @@ impl HostCall {
             "post_float" => Ok(HostCall::Upcall(UpcallId::PostF32)),
             "post_double" => Ok(HostCall::Upcall(UpcallId::PostF64)),
             "yield" => Ok(HostCall::Upcall(UpcallId::Yield)),
+            "SHOOT_HEAT" => Ok(HostCall::Constant(ConstantId::ShootHeat)),
+            "IDLE_HEAT" => Ok(HostCall::Constant(ConstantId::IdleHeat)),
+            "MOVE_HEAT" => Ok(HostCall::Constant(ConstantId::MoveHeat)),
+            "DEATH_HEAT" => Ok(HostCall::Constant(ConstantId::DeathHeat)),
+            "INSTRS_PER_STEP" => Ok(HostCall::Constant(ConstantId::InstrsPerStep)),
+            "BULLET_VELOCITY" => Ok(HostCall::Constant(ConstantId::BulletVelocity)),
+            "BULLET_SPACING" => Ok(HostCall::Constant(ConstantId::BulletSpacing)),
+            "TANK_HIT_RADIUS" => Ok(HostCall::Constant(ConstantId::TankHitRadius)),
+            "TANK_VELOCITY" => Ok(HostCall::Constant(ConstantId::TankVelocity)),
+            "EXPLOSION_RADIUS" => Ok(HostCall::Constant(ConstantId::ExplosionRadius)),
             "abs_float" => Ok(HostCall::UnaryOpF32(UnaryOp::Abs)),
             "acos_float" => Ok(HostCall::UnaryOpF32(UnaryOp::Acos)),
             "acosh_float" => Ok(HostCall::UnaryOpF32(UnaryOp::Acosh)),
@@ -147,6 +161,7 @@ impl HostCall {
             HostCall::Upcall(UpcallId::PostF32) => (vec![ValueType::F32], None),
             HostCall::Upcall(UpcallId::PostF64) => (vec![ValueType::F64], None),
             HostCall::Upcall(UpcallId::Yield) => (vec![], None),
+            HostCall::Constant(c) => (vec![], Some(c.value_type())),
             HostCall::UnaryOpF32(_) => (vec![ValueType::F32], Some(ValueType::F32)),
             HostCall::BinaryOpF32(_) => {
                 (vec![ValueType::F32, ValueType::F32], Some(ValueType::F32))
@@ -161,17 +176,18 @@ impl HostCall {
     pub fn from_id(id: usize) -> Option<Self> {
         match id {
             x @ B0..B1 => Some(HostCall::Upcall(FromPrimitive::from_usize(x - B0).unwrap())),
-            x @ B1..B2 => Some(HostCall::UnaryOpF32(
-                FromPrimitive::from_usize(x - B1).unwrap(),
-            )),
-            x @ B2..B3 => Some(HostCall::BinaryOpF32(
+            x @ B1..B2 => Some(HostCall::Constant(FromPrimitive::from_usize(x - B1).unwrap())),
+            x @ B2..B3 => Some(HostCall::UnaryOpF32(
                 FromPrimitive::from_usize(x - B2).unwrap(),
             )),
-            x @ B3..B4 => Some(HostCall::UnaryOpF64(
+            x @ B3..B4 => Some(HostCall::BinaryOpF32(
                 FromPrimitive::from_usize(x - B3).unwrap(),
             )),
-            x @ B4..B5 => Some(HostCall::BinaryOpF64(
+            x @ B4..B5 => Some(HostCall::UnaryOpF64(
                 FromPrimitive::from_usize(x - B4).unwrap(),
+            )),
+            x @ B5..B6 => Some(HostCall::BinaryOpF64(
+                FromPrimitive::from_usize(x - B5).unwrap(),
             )),
             _ => None,
         }
@@ -179,11 +195,12 @@ impl HostCall {
 
     pub fn to_id(&self) -> usize {
         match self {
-            HostCall::Upcall(x) => *x as usize,
-            HostCall::UnaryOpF32(x) => *x as usize + NUM_UPCALLS,
-            HostCall::BinaryOpF32(x) => *x as usize + NUM_UPCALLS + NUM_UNOPS,
-            HostCall::UnaryOpF64(x) => *x as usize + NUM_UPCALLS + NUM_UNOPS + NUM_BINOPS,
-            HostCall::BinaryOpF64(x) => *x as usize + NUM_UPCALLS + 2 * NUM_UNOPS + NUM_BINOPS,
+            HostCall::Upcall(x) => *x as usize + B0,
+            HostCall::Constant(x) => *x as usize + B1,
+            HostCall::UnaryOpF32(x) => *x as usize + B2,
+            HostCall::BinaryOpF32(x) => *x as usize + B3,
+            HostCall::UnaryOpF64(x) => *x as usize + B4,
+            HostCall::BinaryOpF64(x) => *x as usize + B5,
         }
     }
 }
@@ -211,6 +228,55 @@ enum UpcallId {
 }
 
 const NUM_UPCALLS: usize = UpcallId::Yield as usize + 1;
+
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
+enum ConstantId {
+    ShootHeat,
+    IdleHeat,
+    MoveHeat,
+    DeathHeat,
+    InstrsPerStep,
+    BulletVelocity,
+    BulletSpacing,
+    TankHitRadius,
+    TankVelocity,
+    ExplosionRadius, // Must be last, or else change the constant below
+}
+
+impl ConstantId {
+    pub fn value_type(&self) -> ValueType {
+        match &self {
+            ConstantId::ShootHeat => ValueType::I32,
+            ConstantId::IdleHeat => ValueType::I32,
+            ConstantId::MoveHeat => ValueType::I32,
+            ConstantId::DeathHeat => ValueType::I32,
+            ConstantId::InstrsPerStep => ValueType::I64,
+            ConstantId::BulletVelocity => ValueType::F32,
+            ConstantId::BulletSpacing => ValueType::F32,
+            ConstantId::TankHitRadius => ValueType::F32,
+            ConstantId::TankVelocity => ValueType::F32,
+            ConstantId::ExplosionRadius => ValueType::F32,
+        }
+    }
+
+    pub fn runtime_value(&self, config: &Configuration) -> RuntimeValue {
+        match &self {
+            ConstantId::ShootHeat => RuntimeValue::I32(config.shoot_heat),
+            ConstantId::IdleHeat => RuntimeValue::I32(config.idle_heat),
+            ConstantId::MoveHeat => RuntimeValue::I32(config.move_heat),
+            ConstantId::DeathHeat => RuntimeValue::I32(config.death_heat),
+            ConstantId::InstrsPerStep => RuntimeValue::I64(i64::from_ne_bytes(config.instrs_per_step.to_ne_bytes())),
+            ConstantId::BulletVelocity => RuntimeValue::F32(F32::from_float(config.bullet_v)),
+            ConstantId::BulletSpacing => RuntimeValue::F32(F32::from_float(config.bullet_s)),
+            ConstantId::TankHitRadius => RuntimeValue::F32(F32::from_float(config.hit_rad)),
+            ConstantId::TankVelocity => RuntimeValue::F32(F32::from_float(config.tank_v)),
+            ConstantId::ExplosionRadius => RuntimeValue::F32(F32::from_float(config.explode_rad)),
+        }
+    }
+}
+
+const NUM_CONSTANTS: usize = ConstantId::ExplosionRadius as usize + 1;
 
 #[repr(usize)]
 #[derive(Clone, Copy, Debug, FromPrimitive)]
@@ -379,8 +445,8 @@ impl Upcall {
             Upcall::None => false,
             Upcall::Scan(_, _, _) => false,
             Upcall::Fire => true,
-            Upcall::Aim(_) => true,
-            Upcall::Turn(_) => true,
+            Upcall::Aim(_) => false,
+            Upcall::Turn(_) => false,
             Upcall::GPSX(_) => false,
             Upcall::GPSY(_) => false,
             Upcall::Temp(_) => false,
@@ -425,11 +491,7 @@ impl core::fmt::Display for Upcall {
 impl HostError for Upcall {}
 
 #[derive(Clone, Debug)]
-struct HostImports {}
-
-#[derive(Clone, Debug)]
-struct HostFuncs {
-    memory: MemoryRef,
+struct HostImports {
 }
 
 impl ModuleImportResolver for HostImports {
@@ -452,6 +514,12 @@ impl ModuleImportResolver for HostImports {
             id.to_id(),
         ));
     }
+}
+
+#[derive(Clone, Debug)]
+struct HostFuncs {
+    memory: MemoryRef,
+    config: Configuration,
 }
 
 impl Externals for HostFuncs {
@@ -519,6 +587,7 @@ impl Externals for HostFuncs {
                 }
                 UpcallId::Yield => Upcall::None,
             })))),
+            HostCall::Constant(c) => Ok(Some(c.runtime_value(&self.config))),
             HostCall::UnaryOpF32(op) | HostCall::UnaryOpF64(op) => {
                 Ok(Some(op.do_runtime(args.nth_value_checked(0)?)))
             }
@@ -542,8 +611,8 @@ enum VMState {
 }
 
 impl VM {
-    pub fn new(program: Vec<u8>) -> Result<Self, wasmi::Error> {
-        let imports = HostImports {};
+    pub fn new(program: Vec<u8>, config: Configuration) -> Result<Self, wasmi::Error> {
+        let imports = HostImports { };
         let module = wasmi::Module::from_buffer(&program)?;
         let instance = ModuleInstance::new(
             &module,
@@ -555,7 +624,7 @@ impl VM {
             .ok_or(wasmi::Error::Instantiation("Export `memory` is not a memory!".into()))?
             .clone();
         let mut externals = HostFuncs {
-            memory
+            memory, config,
         };
         if let Some(ExternVal::Func(fr)) = instance.not_started_instance().export_by_name(&"tank") {
             let mut invocation = Box::new(FuncInstance::invoke_resumable(&fr, vec![])?);

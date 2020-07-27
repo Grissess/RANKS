@@ -3,6 +3,17 @@
 
 #include <stdint.h>
 
+extern int32_t SHOOT_HEAT();
+extern int32_t IDLE_HEAT();
+extern int32_t MOVE_HEAT();
+extern int32_t DEATH_HEAT();
+extern uint64_t INSTRS_PER_STEP();
+extern float BULLET_VELOCITY();
+extern float BULLET_SPACING();
+extern float TANK_HIT_RADIUS();
+extern float TANK_VELOCITY();
+extern float EXPLOSION_RADIUS();
+
 // See the Rust standard library for details on each of these.
 extern float abs_float(float);
 extern float acos_float(float);
@@ -90,6 +101,7 @@ extern void aim(float);
 extern void turn(float);
 extern float gpsx();
 extern float gpsy();
+extern int32_t temp();
 extern void forward();
 extern void explode();
 extern void post_string(char*);

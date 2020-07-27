@@ -97,6 +97,22 @@ impl Serialize for Tank {
 }
 
 impl Tank {
+    pub fn new(pos: Pair, team: Team, prog: Vec<u8>, config: Configuration) -> Result<Tank, wasmi::Error> {
+        let ips = config.instrs_per_step;
+        let vm = VM::new(prog, config)?;
+        Ok(Tank {
+            pos,
+            aim: 0.0,
+            angle: 0.0,
+            team: team,
+            instrs_per_step: ips,
+            temp: 0,
+            vm,
+            state: TankState::Free,
+            timers: [0],
+        })
+    }
+
     pub fn apply_heat(&mut self, heat: i32) {
         self.temp = self.temp.saturating_add(heat);
         if self.temp < 0 {
