@@ -1,4 +1,4 @@
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::{UnsafeCell};
 use std::marker::PhantomData;
 use std::ops::{Add, Mul, Neg};
 
@@ -184,7 +184,7 @@ impl Default for AABB {
 
 pub trait SpaceQuery<'a, T: 'a> {
     type QueryIter: Iterator<Item = (Pair, &'a T)>;
-    fn add_pt(&mut self, d: (Pair, T)) -> bool;
+    fn add_pt(&mut self, d: (Pair, T)) -> Result<(), T>;
     fn query(&'a self, b: AABB) -> Self::QueryIter;
 }
 
@@ -250,6 +250,7 @@ impl<T> QuadTreeNode<T> {
         let halfdim = self.bound.dim * 0.5;
         let midp = self.bound.org + halfdim;
 
+
         let mut children = QuadTreeChildren {
             pp: UnsafeCell::new(self.derive_child(AABB::new(midp, halfdim))),
             pn: UnsafeCell::new(self.derive_child(AABB::new(
@@ -270,12 +271,21 @@ impl<T> QuadTreeNode<T> {
         };
 
         for datum in self.data.drain(..) {
-            let d = RefCell::new(Some(datum));
+            let pos = datum.0;
+            let mut d = Some(datum);
             if !children
                 .iter_mut()
-                .any(move |child| child.add_pt(d.borrow_mut().take().unwrap()))
+                .any(|child| {
+                    match child.add_pt(d.take().unwrap()) {
+                        Ok(()) => true,
+                        Err(b) => {
+                            d = Some((pos, b));
+                            false
+                        }
+                    }
+                })
             {
-                panic!("Couldn't insert a point into any quadtree child!");
+                panic!("Couldn't insert a point into any quadtree child! AABB: {:?} point: {:?}", self.bound, pos);
             }
         }
 
@@ -332,7 +342,6 @@ impl<'a, T> Iterator for QuadTreeChildrenIterMut<'a, T> {
             4 => Some(unsafe { std::intrinsics::transmute(self.val.nn.get()) }),
             _ => None,
         };
-        self.index += 1;
         v
     }
 }
@@ -399,9 +408,10 @@ impl<'a, T: 'a> Iterator for QuadTreeQueryIterator<'a, T> {
 
 impl<'a, T: 'a> SpaceQuery<'a, T> for QuadTreeNode<T> {
     type QueryIter = QuadTreeQueryIterator<'a, T>;
-    fn add_pt(&mut self, datum: (Pair, T)) -> bool {
+    fn add_pt(&mut self, datum: (Pair, T)) -> Result<(), T> {
+        let pos = datum.0;
         if !self.bound.contains(datum.0) {
-            return false;
+            return Err(datum.1);
         }
 
         if self.data.len() >= self.max_data {
@@ -409,17 +419,25 @@ impl<'a, T: 'a> SpaceQuery<'a, T> for QuadTreeNode<T> {
         }
 
         if let Some(children) = &mut self.children {
-            let d = RefCell::new(Some(datum));
+            let mut d = Some(datum);
             if !children
                 .iter_mut()
-                .any(move |child| child.add_pt(d.borrow_mut().take().unwrap()))
+                .any(|child| {
+                    match child.add_pt(d.take().unwrap()) {
+                        Ok(()) => true,
+                        Err(b) => {
+                            d = Some((pos, b));
+                            false
+                        }
+                    }
+                })
             {
                 panic!("Couldn't insert a point into any quadtree child");
             }
         } else {
             self.data.push(datum);
         }
-        true
+        Ok(())
     }
 
     fn query(&'a self, b: AABB) -> QuadTreeQueryIterator<'a, T> {

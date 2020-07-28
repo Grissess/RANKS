@@ -345,10 +345,10 @@ impl World {
         .build();
 
         for t in self.tanks.read().unwrap().iter() {
-            root.add_pt((t.read().unwrap().pos, EntityRef::Tank(Arc::clone(t))));
+            core::mem::drop(root.add_pt((t.read().unwrap().pos, EntityRef::Tank(Arc::clone(t)))));
         }
         for b in self.bullets.read().unwrap().iter() {
-            root.add_pt((b.read().unwrap().pos, EntityRef::Bullet(Arc::clone(b))));
+            core::mem::drop(root.add_pt((b.read().unwrap().pos, EntityRef::Bullet(Arc::clone(b)))));
         }
 
         for t in self.tanks.read().unwrap().iter() {
