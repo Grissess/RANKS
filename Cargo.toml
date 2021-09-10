@@ -4,3 +4,11 @@ version = "0.1.0"
 authors = ["Graham Northup <grissess@nexusg.org>"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasmi = { git = "git://github.com/thajohns/wasmi.git", branch = "preemption" }
+num-traits = "0.2"
+num-derive = "0.2"
+websocket = "0.26"
+native-tls = "0.2"
+bus = "2.2"

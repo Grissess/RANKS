@@ -1,39 +1,160 @@
+#![allow(non_snake_case)]
+
+extern crate serde;
+extern crate serde_json;
+extern crate websocket;
+
 extern crate RANKS;
 
+use std::sync::{Arc, RwLock};
+use std::thread::sleep;
+use std::time::Duration;
 use std::{env, fs};
-use std::io::Read;
 
-use RANKS::vm::{Program, Parser, VM, StateBuilder};
-use RANKS::sim::{World, Configuration, Tank, Team};
+use serde::Serialize;
+
+use websocket::OwnedMessage;
+
+use RANKS::sim::{Bullet, Configuration, Identity, Tank, Team};
 use RANKS::space::Pair;
+use RANKS::server::{TankServer, ClientMessage};
 
-const world_size: usize = 500;
+const WORLD_SIZE: usize = 500;
+
+const DELAY_DURATION: Duration = Duration::from_millis(1);
+
+#[derive(Serialize)]
+struct UpdatePacket<'a> {
+    tanks: &'a Vec<Identity<Arc<RwLock<Tank>>>>,
+    bullets: &'a Vec<Identity<Arc<RwLock<Bullet>>>>,
+}
+
+enum Mode {
+    LocalHeadless,
+    WebsocketWatch,
+}
 
 fn main() {
-    let progs: Vec<Program> = env::args_os().skip(1).map(
-            |fname| fs::File::open(fname).expect("Couldn't open file")
-        ).map(|mut f| { let mut s = String::new(); f.read_to_string(&mut s).expect("Couldn't read file"); s })
-        .map(|s| Program::parse(&s).expect("Parsing failed"))
-        .collect();
-    let progcount = progs.len();
-
-    eprintln!("{:?}", progs);
-
-    let mut world = Configuration::default().build();
-    for (idx, prog) in progs.into_iter().enumerate() {
-        world.add_tank(Tank {
-            pos: Pair::polar((idx as f32) / (progcount as f32) * 2.0 * ::std::f32::consts::PI) * 0.75 * (world_size as f32),
-            aim: 0.0,
-            angle: 0.0,
-            team: idx as Team,
-            temp: 0,
-            vm: VM::new(prog, StateBuilder::default().build()),
-            dead: false,
-        });
+    fn print_subcommands() {
+        println!("Valid subcommands are:");
+        println!("local_headless");
+        println!("websocket_watch");
     }
+    let mode = match env::args_os().nth(1).map(|s| s.into_string()) {
+        Some(Ok(s)) => match &s.as_str() {
+            &"local_headless" => Mode::LocalHeadless,
+            &"websocket_watch" => Mode::WebsocketWatch,
+            _ => {
+                print_subcommands();
+                return;
+            }
+        }
+        _ => {
+            print_subcommands();
+            return;
+        }
+    };
+    match mode {
+        Mode::LocalHeadless => {
+            let progs: Vec<Vec<u8>> = env::args_os()
+                .skip(2)
+                .map(|fname| fs::read(&fname).expect(&format!("Couldn't read file {:#?}", fname)))
+                .collect();
+            let progcount = progs.len();
 
-    for i in 0..10 {
-        world.step();
-        eprintln!("---\n{:?}", world);
+            let mut world = Configuration::default().build();
+            let config = world.config.clone();
+            for (idx, prog) in progs.into_iter().enumerate() {
+                let tank = Tank::new(
+                    Pair::polar((idx as f32) / (progcount as f32) * 2.0 * ::std::f32::consts::PI)
+                    * 0.75
+                    * (WORLD_SIZE as f32),
+                    idx as Team,
+                    prog,
+                    config.clone(),
+                    );
+                if let Ok(tank) = tank {
+                    world.add_tank(tank);
+                }
+            }
+
+            let mut stepnum = 0;
+            while !world.finished() {
+                world.step();
+                println!("Step: {}", stepnum);
+                println!(
+                    "json: {}",
+                    serde_json::to_string(&UpdatePacket {
+                        tanks: &*world.tanks.read().unwrap(),
+                        bullets: &*world.bullets.read().unwrap(),
+                    })
+                    .unwrap()
+                    );
+                sleep(DELAY_DURATION);
+                stepnum += 1;
+                //eprintln!("---\n{:?}", world);
+            }
+        }
+        Mode::WebsocketWatch => {
+            let progs: Vec<Vec<u8>> = env::args_os()
+                .skip(2)
+                .map(|fname| fs::read(&fname).expect(&format!("Couldn't read file {:#?}", fname)))
+                .collect();
+            let progcount = progs.len();
+
+            let mut world = Configuration::default().build();
+            let config = world.config.clone();
+            for (idx, prog) in progs.into_iter().enumerate() {
+                let tank = Tank::new(
+                    Pair::polar((idx as f32) / (progcount as f32) * 2.0 * ::std::f32::consts::PI)
+                    * 0.75
+                    * (WORLD_SIZE as f32),
+                    idx as Team,
+                    prog,
+                    config.clone(),
+                    );
+                if let Ok(tank) = tank {
+                    world.add_tank(tank);
+                }
+            }
+
+            let mut server = TankServer::new(Arc::new(OwnedMessage::Text("{}".into()))).unwrap();
+            let rx = server.receiver().unwrap();
+            server.init();
+            let mut client_count = 0usize;
+            let mut stepnum = 0;
+            while !world.finished() {
+                loop {
+                    let rc = if client_count == 0 {
+                        Ok(rx.recv().unwrap())
+                    } else {
+                        rx.try_recv()
+                    };
+                    match rc {
+                        Ok(ClientMessage::Connect(team, addr)) => {
+                            println!("Connection from {}, team {}", addr.unwrap(), team);
+                            client_count += 1;
+                        },
+                        Ok(ClientMessage::Disconnect(team)) => {
+                            println!("Team {} disconnected", team);
+                            client_count -= 1;
+                        },
+                        Err(_) => break,
+                        _ => (),
+                    }
+                }
+                world.step();
+                println!("Step: {}", stepnum);
+                let bcast = OwnedMessage::Text(serde_json::to_string(&UpdatePacket {
+                    tanks: &*world.tanks.read().unwrap(),
+                    bullets: &*world.bullets.read().unwrap(),
+                })
+                .unwrap());
+                server.broadcaster().broadcast(bcast);
+                sleep(DELAY_DURATION);
+                stepnum += 1;
+                //eprintln!("---\n{:?}", world);
+            }
+        }
     }
 }
